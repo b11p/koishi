@@ -3,7 +3,7 @@
 import { defineAsyncComponent } from 'vue'
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
-import coreLibrary from 'koishi/lib/koishi.d.ts?raw'
+import coreLibrary from 'koishi/lib/index.d.ts?raw'
 import utilsLibrary from 'koishi/lib/utils.d.ts?raw'
 import OneDark from './onedark.yaml'
 import OneLight from './onelight.yaml'

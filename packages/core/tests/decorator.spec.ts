@@ -18,7 +18,7 @@ describe('Plugin Context', () => {
     @User.Except('456')
     @Middleware()
     hello(session: Session) {
-      return session.send(this.state.config.text)
+      return session.send(this.config.text)
     }
 
     @Apply

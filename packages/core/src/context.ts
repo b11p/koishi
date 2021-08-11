@@ -13,10 +13,67 @@ export type Awaitable<T> = T extends Promise<unknown> ? T : T | Promise<T>
 export type Await<T> = T extends Promise<infer U> ? U : T
 export type Disposable = () => void
 
-export type Plugin<T = any> = Plugin.Function<T> | Plugin.Object<T>
+export type MethodDecorator<T = (...args: any[]) => any>
+  = (target: Object, key: string | symbol, desc: TypedPropertyDescriptor<T>)
+    => void | TypedPropertyDescriptor<T>
+
+export const Middleware: (prepend?: boolean) => MethodDecorator = (prepend) => (target, prop, desc) => {
+  Plugin.meta.ensure(target).set(desc.value, function () {
+    this.middleware(desc.value.bind(this), prepend)
+  })
+}
+
+export const Apply: MethodDecorator = (target, prop, desc) => {
+  Plugin.meta.ensure(target).set(desc.value, function () {
+    desc.value.call(this)
+  })
+}
+
+type EventDecorator<T> = <E extends keyof T>(name: E, xpend?: boolean) => MethodDecorator
+
+export const Event: EventDecorator<EventMap> = (name, prepend) => (target, prop, desc) => {
+  Plugin.meta.ensure(target).set(desc.value, function () {
+    this.on(name, desc.value.bind(this), prepend)
+  })
+}
+
+export const BeforeEvent: EventDecorator<BeforeEventMap> = (name, append) => (target, prop, desc) => {
+  Plugin.meta.ensure(target).set(desc.value, function () {
+    this.before(name, desc.value.bind(this), append)
+  })
+}
+
+export class Metadata<K extends object, V> extends WeakMap<K, V> {
+  constructor(private fallback: () => V) {
+    super()
+  }
+
+  ensure(key: K) {
+    if (!this.has(key)) this.set(key, this.fallback())
+    return this.get(key)
+  }
+}
+
+export class Plugin<T> {
+  static meta = new Metadata(() => new Map<Function, (this: Context) => void>())
+
+  constructor(protected context: Context, public config: T) {
+    const callbacks = Plugin.meta.get(Object.getPrototypeOf(this))
+    callbacks?.forEach(cb => cb.call(context))
+  }
+}
 
 export namespace Plugin {
-  export type Function<T = any> = (ctx: Context, options: T) => void
+  export type Apply<T = any> = (ctx: Context, options: T) => void
+  export type Construct<T = any> = new (ctx: Context, options: T) => void
+  export type Function<T = any> = Apply<T> | Construct<T>
+  export type Entry<T = any> = Function<T> | Object<T>
+
+  export type Config<T extends Entry> =
+    | T extends Apply<infer U> ? U
+    : T extends Construct<infer U> ? U
+    : T extends Object<infer U> ? U
+    : never
 
   export interface Meta {
     name?: string
@@ -24,18 +81,16 @@ export namespace Plugin {
   }
 
   export interface Object<T = any> extends Meta {
-    apply: Function<T>
+    apply: Apply<T>
   }
-
-  export type Config<T extends Plugin> = T extends Function<infer U> ? U : T extends Object<infer U> ? U : never
 
   export interface State<T = any> extends Meta {
     id?: string
     parent?: State
     context?: Context
     config?: T
-    plugin?: Plugin
-    children: Plugin[]
+    plugin?: Plugin.Entry
+    children: Plugin.Entry[]
     disposables: Disposable[]
   }
 
@@ -47,24 +102,24 @@ export namespace Plugin {
     ? [L extends keyof Library ? Library[L] : unknown, ...From<R>]
     : []
 
-  export class Registry extends Map<Plugin, State> {
-    resolve(plugin: Plugin) {
+  export class Registry extends Map<Plugin.Function, State> {
+    resolve(plugin: Plugin.Entry) {
       return plugin && (typeof plugin === 'function' ? plugin : plugin.apply)
     }
 
-    get(plugin: Plugin) {
+    get(plugin: Plugin.Entry) {
       return super.get(this.resolve(plugin))
     }
 
-    set(plugin: Plugin, state: State) {
+    set(plugin: Plugin.Entry, state: State) {
       return super.set(this.resolve(plugin), state)
     }
 
-    has(plugin: Plugin) {
+    has(plugin: Plugin.Entry) {
       return super.has(this.resolve(plugin))
     }
 
-    delete(plugin: Plugin) {
+    delete(plugin: Plugin.Entry) {
       return super.delete(this.resolve(plugin))
     }
   }
@@ -95,9 +150,9 @@ export class Context {
 
   protected _bots: Bot[] & Record<string, Bot>
 
-  protected constructor(public filter: Filter, public app?: App, private _plugin: Plugin = null) {}
+  protected constructor(public filter: Filter, public app?: App, private _plugin: Plugin.Entry = null) {}
 
-  private static inspect(plugin: Plugin) {
+  private static inspect(plugin: Plugin.Entry) {
     return !plugin ? 'root' : typeof plugin === 'object' && plugin.name || 'anonymous'
   }
 
@@ -220,8 +275,8 @@ export class Context {
     return this
   }
 
-  plugin<T extends Plugin>(plugin: T, options?: boolean | Plugin.Config<T>): this
-  plugin(plugin: Plugin, options?: any) {
+  plugin<T extends Plugin.Entry>(plugin: T, options?: boolean | Plugin.Config<T>): this
+  plugin(plugin: Plugin.Entry, options?: any) {
     if (options === false) return this
     if (options === true) options = undefined
 
@@ -243,7 +298,11 @@ export class Context {
     })
  
     if (typeof plugin === 'function') {
-      plugin(ctx, options)
+      if (Object.prototype.toString.call(plugin).startsWith('class ')) {
+        Reflect.construct(plugin, [ctx, options])
+      } else {
+        Reflect.apply(plugin, null, [ctx, options])
+      }
     } else if (plugin && typeof plugin === 'object' && typeof plugin.apply === 'function') {
       ctx.state.name = plugin.name
       if (plugin.sideEffect) ctx.addSideEffect()
@@ -272,8 +331,8 @@ export class Context {
     })
   }
 
-  async parallel<K extends EventName>(name: K, ...args: Parameters<EventMap[K]>): Promise<Await<ReturnType<EventMap[K]>>[]>
-  async parallel<K extends EventName>(session: Session, name: K, ...args: Parameters<EventMap[K]>): Promise<Await<ReturnType<EventMap[K]>>[]>
+  async parallel<K extends Event>(name: K, ...args: Parameters<EventMap[K]>): Promise<Await<ReturnType<EventMap[K]>>[]>
+  async parallel<K extends Event>(session: Session, name: K, ...args: Parameters<EventMap[K]>): Promise<Await<ReturnType<EventMap[K]>>[]>
   async parallel(...args: any[]) {
     const tasks: Promise<any>[] = []
     const session = typeof args[0] === 'object' ? args.shift() : null
@@ -285,14 +344,14 @@ export class Context {
     return Promise.all(tasks)
   }
 
-  emit<K extends EventName>(name: K, ...args: Parameters<EventMap[K]>): void
-  emit<K extends EventName>(session: Session, name: K, ...args: Parameters<EventMap[K]>): void
+  emit<K extends Event>(name: K, ...args: Parameters<EventMap[K]>): void
+  emit<K extends Event>(session: Session, name: K, ...args: Parameters<EventMap[K]>): void
   emit(...args: [any, ...any[]]) {
     this.parallel(...args)
   }
 
-  waterfall<K extends EventName>(name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
-  waterfall<K extends EventName>(session: Session, name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
+  waterfall<K extends Event>(name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
+  waterfall<K extends Event>(session: Session, name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
   async waterfall(...args: [any, ...any[]]) {
     const session = typeof args[0] === 'object' ? args.shift() : null
     const name = args.shift()
@@ -304,8 +363,8 @@ export class Context {
     return args[0]
   }
 
-  chain<K extends EventName>(name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
-  chain<K extends EventName>(session: Session, name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
+  chain<K extends Event>(name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
+  chain<K extends Event>(session: Session, name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
   chain(...args: [any, ...any[]]) {
     const session = typeof args[0] === 'object' ? args.shift() : null
     const name = args.shift()
@@ -317,8 +376,8 @@ export class Context {
     return args[0]
   }
 
-  serial<K extends EventName>(name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
-  serial<K extends EventName>(session: Session, name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
+  serial<K extends Event>(name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
+  serial<K extends Event>(session: Session, name: K, ...args: Parameters<EventMap[K]>): Promisify<ReturnType<EventMap[K]>>
   async serial(...args: any[]) {
     const session = typeof args[0] === 'object' ? args.shift() : null
     const name = args.shift()
@@ -329,8 +388,8 @@ export class Context {
     }
   }
 
-  bail<K extends EventName>(name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
-  bail<K extends EventName>(session: Session, name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
+  bail<K extends Event>(name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
+  bail<K extends Event>(session: Session, name: K, ...args: Parameters<EventMap[K]>): ReturnType<EventMap[K]>
   bail(...args: any[]) {
     const session = typeof args[0] === 'object' ? args.shift() : null
     const name = args.shift()
@@ -341,8 +400,8 @@ export class Context {
     }
   }
 
-  on<K extends EventName>(name: K, listener: EventMap[K], prepend?: boolean): () => boolean
-  on(name: string & EventName, listener: Disposable, prepend = false) {
+  on<K extends Event>(name: K, listener: EventMap[K], prepend?: boolean): () => boolean
+  on(name: string & Event, listener: Disposable, prepend = false) {
     const method = prepend ? 'unshift' : 'push'
 
     // handle special events
@@ -372,13 +431,13 @@ export class Context {
     return dispose
   }
 
-  before<K extends BeforeEventName>(name: K, listener: BeforeEventMap[K], append = false) {
+  before<K extends BeforeEvent>(name: K, listener: BeforeEventMap[K], append = false) {
     const seg = name.split('/')
     seg[seg.length - 1] = 'before-' + seg[seg.length - 1]
-    return this.on(seg.join('/') as EventName, listener, !append)
+    return this.on(seg.join('/') as Event, listener, !append)
   }
 
-  once<K extends EventName>(name: K, listener: EventMap[K], prepend = false) {
+  once<K extends Event>(name: K, listener: EventMap[K], prepend = false) {
     const dispose = this.on(name, function (...args: any[]) {
       dispose()
       return listener.apply(this, args)
@@ -386,7 +445,7 @@ export class Context {
     return dispose
   }
 
-  off<K extends EventName>(name: K, listener: EventMap[K]) {
+  off<K extends Event>(name: K, listener: EventMap[K]) {
     const index = (this.app._hooks[name] || [])
       .findIndex(([context, callback]) => context === this && callback === listener)
     if (index >= 0) {
@@ -581,11 +640,11 @@ type DelegateEventMap = {
   [K in keyof Context.Delegates as `delegate/${K}`]: () => void
 }
 
-type EventName = keyof EventMap
+type Event = keyof EventMap
 type OmitSubstring<S extends string, T extends string> = S extends `${infer L}${T}${infer R}` ? `${L}${R}` : never
-type BeforeEventName = OmitSubstring<EventName & string, 'before-'>
+type BeforeEvent = OmitSubstring<Event & string, 'before-'>
 
-export type BeforeEventMap = { [E in EventName & string as OmitSubstring<E, 'before-'>]: EventMap[E] }
+export type BeforeEventMap = { [E in Event & string as OmitSubstring<E, 'before-'>]: EventMap[E] }
 
 export interface EventMap extends SessionEventMap, DelegateEventMap {
   [Context.middleware]: Middleware
@@ -606,8 +665,8 @@ export interface EventMap extends SessionEventMap, DelegateEventMap {
   'command-added'(command: Command): void
   'command-removed'(command: Command): void
   'middleware'(session: Session): void
-  'plugin-added'(plugin: Plugin, registry: Map<Plugin, Plugin.State>): void
-  'plugin-removed'(plugin: Plugin, registry: Map<Plugin, Plugin.State>): void
+  'plugin-added'(plugin: Plugin.Entry, registry: Map<Plugin.Entry, Plugin.State>): void
+  'plugin-removed'(plugin: Plugin.Entry, registry: Map<Plugin.Entry, Plugin.State>): void
   'before-connect'(): Awaitable<void>
   'connect'(): void
   'before-disconnect'(): Awaitable<void>

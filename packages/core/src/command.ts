@@ -1,6 +1,6 @@
 import { Logger, coerce, Time, template, remove } from '@koishijs/utils'
 import { Argv } from './parser'
-import { Context, Disposable, NextFunction } from './context'
+import { Context, Disposable, NextFunction, Metadata, Plugin, MethodDecorator } from './context'
 import { User, Channel } from './database'
 import { FieldCollector, Session } from './session'
 
@@ -53,7 +53,9 @@ export namespace Command {
     = string | ((session: Session<U, G>) => string | Promise<string>)
 }
 
-export class Command<U extends User.Field = never, G extends Channel.Field = never, A extends any[] = any[], O extends {} = {}> extends Argv.CommandBase {
+type KeyOf<O, T> = { [K in keyof O]: O[K] extends T ? K : never }[keyof O]
+
+class _Command<U extends User.Field = never, G extends Channel.Field = never, A extends any[] = any[], O extends {} = {}> extends Argv.CommandBase {
   config: Command.Config
   children: Command[] = []
   parent: Command = null
@@ -78,6 +80,16 @@ export class Command<U extends User.Field = never, G extends Channel.Field = nev
 
   static defaultOptionConfig: Argv.OptionConfig = {
     authority: 0,
+  }
+
+  static readonly meta = new Metadata(() => [] as ((this: Command) => void)[])
+
+  static decorate<K extends KeyOf<Command, Function>>(key: K) {
+    return (...args: Parameters<Command[K]>): MethodDecorator => (target, prop, desc) => {
+      Command.meta.ensure(target).push(function () {
+        Reflect.apply(this[key], this, args)
+      })
+    }
   }
 
   private static _userFields: FieldCollector<'user'>[] = []
@@ -268,6 +280,26 @@ export class Command<U extends User.Field = never, G extends Channel.Field = nev
     }
   }
 }
+
+export type Command<U extends User.Field = never, G extends Channel.Field = never, A extends any[] = any[], O extends {} = {}> = _Command<U, G, A, O>
+
+type CommandStatic = (def?: string, config?: Command.Config) => MethodDecorator
+
+export const Command = new Proxy(_Command as CommandStatic & typeof _Command, {
+  apply: (target, thisArg, [def, config]): MethodDecorator => (target, prop, desc) => {
+    if (typeof prop !== 'string') return
+    Plugin.meta.ensure(target).set(desc.value, function () {
+      const command = this.command(def || prop, config)
+      const callbacks = Command.meta.get(desc.value)
+      callbacks?.forEach(cb => cb.call(command))
+      command.action(desc.value.bind(this))
+    })
+  },
+})
+
+export const Usage = Command.decorate('usage')
+export const Example = Command.decorate('example')
+export const Option = Command.decorate('option')
 
 export function getUsageName(command: Command) {
   return command.config.usageName || command.name

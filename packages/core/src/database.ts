@@ -1,6 +1,8 @@
 import * as utils from '@koishijs/utils'
 import { Platform } from './adapter'
 import { App } from './app'
+import { Command } from './command'
+import { Context, MethodDecorator, Plugin } from './context'
 
 export type TableType = keyof Tables
 
@@ -9,44 +11,44 @@ export interface Tables {
   channel: Channel
 }
 
-export interface Field<T = any> {
-  type: Field.Type<T>
-  length?: number
-  nullable?: boolean
-  initial?: T
-}
-
-export namespace Field {
-  export const numberTypes: Type[] = ['integer', 'unsigned', 'float', 'double']
-  export const stringTypes: Type[] = ['char', 'string', 'text']
-  export const dateTypes: Type[] = ['timestamp', 'date', 'time']
-  export const objectTypes: Type[] = ['list', 'json']
-
-  type WithParam<S extends string> = S | `${S}(${any})`
-
-  export type Config<O> = {
-    [K in keyof O]?: Field<O[K]> | WithParam<Type<O[K]>>
-  }
-
-  export type Type<T = any> =
-    | T extends number ? 'integer' | 'unsigned' | 'float' | 'double'
-    : T extends string ? 'char' | 'string' | 'text'
-    : T extends Date ? 'timestamp' | 'date' | 'time'
-    : T extends any[] ? 'list' | 'json'
-    : T extends object ? 'json'
-    : never
-
-  const regexp = /^\w+(\(.+\))?$/
-
-  export function parse(definition: string) {
-    const capture = regexp.exec(definition)
-    if (!capture) throw new Error('invalid field definition')
-    return { type: capture[0], length: +capture[1] } as Field
-  }
-}
-
 export namespace Tables {
   type Unique<K> = (K | K[])[]
+
+  export interface Field<T = any> {
+    type: Field.Type<T>
+    length?: number
+    nullable?: boolean
+    initial?: T
+  }
+
+  export namespace Field {
+    export const numberTypes: Type[] = ['integer', 'unsigned', 'float', 'double']
+    export const stringTypes: Type[] = ['char', 'string', 'text']
+    export const dateTypes: Type[] = ['timestamp', 'date', 'time']
+    export const objectTypes: Type[] = ['list', 'json']
+
+    type WithParam<S extends string> = S | `${S}(${any})`
+
+    export type Config<O> = {
+      [K in keyof O]?: Field<O[K]> | WithParam<Type<O[K]>>
+    }
+
+    export type Type<T = any> =
+      | T extends number ? 'integer' | 'unsigned' | 'float' | 'double'
+      : T extends string ? 'char' | 'string' | 'text'
+      : T extends Date ? 'timestamp' | 'date' | 'time'
+      : T extends any[] ? 'list' | 'json'
+      : T extends object ? 'json'
+      : never
+
+    const regexp = /^\w+(\(.+\))?$/
+
+    export function parse(definition: string) {
+      const capture = regexp.exec(definition)
+      if (!capture) throw new Error('invalid field definition')
+      return { type: capture[0], length: +capture[1] } as Field
+    }
+  }
 
   export interface Meta<O = any> {
     type?: 'random' | 'incremental'
@@ -165,6 +167,39 @@ export namespace Query {
   }
 }
 
+type BaseSeletorDecorator<R extends any[]> = (...values: R) => MethodDecorator
+
+interface SelectorDecorator<R extends any[]> extends BaseSeletorDecorator<R> {
+  Except?: BaseSeletorDecorator<R>
+}
+
+type ExtractParameters<U, T extends keyof U> = U[T] extends (...args: infer R) => any ? R : never
+
+function createPartialSelector<T extends keyof Context>(name: T, except?: boolean): BaseSeletorDecorator<ExtractParameters<Context, T>> {
+  return (...args) => (target, prop, desc) => {
+    const map = Plugin.meta.get(target)
+    const callback = map?.get(desc.value)
+    if (!callback) return
+    map.set(desc.value, function () {
+      let selector: any = this[name]
+      if (except) selector = selector.except
+      callback.call(selector(...args))
+    })
+  }
+}
+
+function createSelector<T extends keyof Context, U>(name: T, source?: U): U & SelectorDecorator<ExtractParameters<Context, T>> {
+  const value: any = createPartialSelector(name)
+  value.Except = createPartialSelector(name, true)
+  return Object.assign(value, source)
+}
+
+export const Any = createPartialSelector('any')
+export const Never = createPartialSelector('never')
+export const Self = createSelector('self')
+export const Group = createSelector('group')
+export const Private = createSelector('private')
+
 type MaybeArray<T> = T | T[]
 
 export interface User extends Record<Platform, string> {
@@ -176,16 +211,14 @@ export interface User extends Record<Platform, string> {
   timers: Record<string, number>
 }
 
-export namespace User {
+namespace UserStatic {
   export enum Flag {
     ignore = 1,
   }
 
-  export type Field = keyof User
-  export const fields: Field[] = []
-  export type Index = Platform | 'name' | 'id'
-  export type Observed<K extends Field = Field> = utils.Observed<Pick<User, K>, Promise<void>>
-  type Getter = <T extends Index>(type: T, id: string) => Partial<User>
+  export const Field = Command.decorate('userFields')
+  export const fields: User.Field[] = []
+  type Getter = <T extends User.Index>(type: T, id: string) => Partial<User>
   const getters: Getter[] = []
 
   /**
@@ -196,7 +229,7 @@ export namespace User {
     fields.push(...Object.keys(getter(null as never, '0')) as any)
   }
 
-  export function create<T extends Index>(type: T, id: string) {
+  export function create<T extends User.Index>(type: T, id: string) {
     const result = Tables.create('user')
     result[type] = id
     for (const getter of getters) {
@@ -206,6 +239,15 @@ export namespace User {
   }
 }
 
+export namespace User {
+  export type Flag = UserStatic.Flag
+  export type Field = keyof User
+  export type Index = Platform | 'name' | 'id'
+  export type Observed<K extends Field = Field> = utils.Observed<Pick<User, K>, Promise<void>>
+}
+
+export const User = createSelector('user', UserStatic)
+
 export interface Channel {
   id: string
   type: string
@@ -214,15 +256,14 @@ export interface Channel {
   disable: string[]
 }
 
-export namespace Channel {
+namespace ChannelStatic {
   export enum Flag {
     ignore = 1,
     silent = 4,
   }
 
-  export type Field = keyof Channel
-  export const fields: Field[] = []
-  export type Observed<K extends Field = Field> = utils.Observed<Pick<Channel, K>, Promise<void>>
+  export const Field = Command.decorate('channelFields')
+  export const fields: Channel.Field[] = []
   type Getter = (type: Platform, id: string) => Partial<Channel>
   const getters: Getter[] = []
 
@@ -242,11 +283,19 @@ export namespace Channel {
     }
     return result
   }
+}
+
+export namespace Channel {
+  export type Flag = ChannelStatic.Flag
+  export type Field = keyof Channel
+  export type Observed<K extends Field = Field> = utils.Observed<Pick<Channel, K>, Promise<void>>
 
   export interface Methods {
     getAssignedChannels<K extends Field>(fields?: K[], assignMap?: Record<string, readonly string[]>): Promise<Pick<Channel, K>[]>
   }
 }
+
+export const Channel = createSelector('channel', ChannelStatic)
 
 export interface Database extends Query.Methods, Channel.Methods {}
 
